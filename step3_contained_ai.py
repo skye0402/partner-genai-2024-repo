@@ -47,20 +47,6 @@ footer {
 }
 """
 
-SYS_TEMPLATE = """
-    GPT4 Correct System: You are a helpful multilingual translator to answer the questions based on documents you find below. Don't make up things. If you don't know the answer, say you don't know.
-    Always reply in the user's language not matter the document language.<|end_of_turn|>
-"""
-
-HUMAN_TEMPLATE = """
-    GPT4 Correct User: The question from the user is: '{query}'.
-    Use formatting and markdown to structure the output. Also add the sources (document name and pages you referred to).
-    Reply in the user's language! Below are the documents:
-    ===========================
-    {context}<|end_of_turn|>
-    GPT4 Correct Assistant:
-"""
-
 def user(state: dict, user_message: str, history: list)->tuple:
     """ Handle user interaction in the chat window """
     state["skip_llm"] = False
@@ -72,103 +58,15 @@ def user(state: dict, user_message: str, history: list)->tuple:
 
 def call_llm(state: dict, history: list)->any:
     """ Handle LLM request and response """
-    do_stream = True
-    if state["skip_llm"] == True:
-        return history
-    history[-1][1] = ""
-    llm = state.get("model")
-    if llm == None or state.get("memory", None) == None:
-        state["model"] = get_llm_model(
-            ai_core=state["ai_core"],
-            temperature=0.0,
-            top_p=0.8,
-            do_streaming=do_stream      
-        )
-    if not state.get("connection"):
-        state["connection"] = get_hana_connection(conn_params=state["conn_data"])        
-    # Query the product master
-    vector_db = HanaDB(connection=state["connection"], embedding=DEFAULT_EF, table_name=TABLE_NAME_FOR_DOCUMENTS)
-    query = history[-1][0]
-    rag_chain = retrieve_data(vector_db=vector_db, llm=state["model"])
-    if do_stream:
-        try:
-            for response in rag_chain.stream({"query": query, "language": "en"}):
-                history[-1][1] += response
-                logging.debug(history[-1][1])
-                yield history
-        except Exception as e:
-            history[-1][1] += str(f"😱 Oh no! It seems the LLM has some issues. Error was: {e}.")
-    else:
-        try:
-            response=rag_chain.invoke({"query": query, "language": "en"})
-            history[-1][1] += response
-            logging.debug(history[-1][1])
-            yield history
-        except Exception as e:
-            history[-1][1] += str(f"😱 Oh no! It seems the LLM has some issues. Error was: {e}.")
-    return history 
+    return history
 
 def retrieve_data(vector_db: HanaDB, llm: BaseLanguageModel)->RunnableSerializable:
     """ Retrieves data from store and passes back result """
-    retriever = vector_db.as_retriever(k=6)
-    my_prompt = ChatPromptTemplate(
-        messages=[
-            SystemMessagePromptTemplate.from_template(SYS_TEMPLATE),
-            HumanMessagePromptTemplate.from_template(HUMAN_TEMPLATE)  
-        ],
-        input_variables=['query', 'context', 'language'],
-    )
-    rag_chain = (
-            {
-                "query": itemgetter("query"), 
-                "language": itemgetter("language"),
-                "context": itemgetter("query") | retriever
-            } 
-            | my_prompt 
-            | llm
-        )
-    return rag_chain
+    return
 
 def uploaded_files(state: dict, files: any)->None:
     """ Handles the uploaded pdf files and care for embedding into HANA VS """
-    documents = []
-    if files==None: # Happens when the list is cleared
-        return
-    for file in files:
-        if file.endswith('.pdf'):
-            loader = PyPDFLoader(file_path=file, extract_images=False)
-        else:
-            raise ValueError('File format not supported. Please provide a .pdf or .docx file.')
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, 
-                                                    chunk_overlap=100, 
-                                                    length_function=len, 
-                                                    is_separator_regex=False
-                                                    )
-        docs=loader.load_and_split(text_splitter)
-        for doc in docs:
-            if doc.metadata.get("source", None) != None:
-                doc.metadata["source"]=os.path.basename(file)
-            if doc.metadata.get("page", None) != None:
-                doc.metadata["page"]=int(doc.metadata["page"]) + 1
-        documents.extend(docs)
-    gr.Info(f"Uploaded {len(files)} file(s). Split into {len(documents)} documents.")
-    
-    if not state.get("connection"):
-        state["connection"] = get_hana_connection(conn_params=state["conn_data"])
-    vector_db = HanaDB(embedding=DEFAULT_EF, connection=state["connection"], table_name=TABLE_NAME_FOR_DOCUMENTS)
-    try:
-        vector_db.delete(filter={})
-    except Exception as e:
-        logging.warning(f"Deleting embedding entries failed with error {e}. Maybe there were no embeddings?")
-    # Add the documents which we uploaded and split
-    try:
-        vector_db.add_documents(documents=documents)
-        logging.info(f"Embedded {len(documents)} documents in table {TABLE_NAME_FOR_DOCUMENTS}.")
-        gr.Info(f"Embedded {len(documents)} documents in table {TABLE_NAME_FOR_DOCUMENTS}.")
-    except Exception as e:
-        logging.error(f"Adding document embeddings failed with error {e}.")
-    finally:
-        return
+    return
     
 def clear_data(state: dict)->list:
     """ Clears the history of the chat """

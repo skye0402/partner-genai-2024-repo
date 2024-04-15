@@ -42,8 +42,11 @@ def main()->None:
         exit()
     logging.info(f"Connecting to SAP HANA Cloud host {hana_cloud.get('host')} with user {hana_cloud.get('user')}...")
     hana_conn = get_hana_connection(conn_params=hana_cloud)
-    hana_conn.close()   
-   
+    try:
+        hana_conn.close()
+        logging.info("Connection test was successful.") 
+    except Exception as e:
+        logging.error(f"Error occurred: {e}")   
     
 if __name__ == "__main__":
     main()
