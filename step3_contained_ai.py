@@ -29,6 +29,11 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL","all-MiniLM-L12-v2")
 DEFAULT_EF = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
 TABLE_NAME_FOR_DOCUMENTS  = "CML2024WS"
 
+LOGO_MARKDOWN = f"""
+### Conference on Machine Learning 2024
+![LLM Privacy on SAP BTP](file/img/cml2024.webp)
+"""
+
 BLOCK_CSS = """
 gradio-app > .gradio-container {
     max-width: 100% !important;
@@ -107,6 +112,7 @@ def build_chat_view(conn_data: dict, ai_core: AICoreHandling)->Blocks:
             with gr.Column(scale=3, elem_id="column_right") as column_right:
                 files = gr.File(label="RAG File Upload", file_count="multiple", file_types=[".pdf"])
                 clear = gr.Button(value="Clear history")
+                cml2024img = gr.Markdown(value=LOGO_MARKDOWN, elem_id="cml2024_box")
         msg_box.submit(user, 
                        inputs=[state, msg_box, chatbot], 
                        outputs=[msg_box, chatbot], 
