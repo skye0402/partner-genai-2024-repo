@@ -82,7 +82,7 @@ def call_llm(state: dict, history: list)->any:
         return history
     history[-1][1] = ""
     llm = state.get("model")
-    if llm == None or state.get("memory", None) == None: #<--- Memory not needed
+    if not llm:
         state["model"] = get_llm_model(
             ai_core=state["ai_core"],
             temperature=0.0,
@@ -151,7 +151,9 @@ def uploaded_files(state: dict, files: any)->None:
             if doc.metadata.get("page", None) != None:
                 doc.metadata["page"]=int(doc.metadata["page"]) + 1
         documents.extend(docs)
-    gr.Info(f"Uploaded {len(files)} file(s). Split into {len(documents)} documents.")
+    msg = f"Uploaded {len(files)} file(s). Split into {len(documents)} documents."
+    logging.info(msg)
+    gr.Info(msg)
     
     if not state.get("connection"):
         state["connection"] = get_hana_connection(conn_params=state["conn_data"])
@@ -163,8 +165,9 @@ def uploaded_files(state: dict, files: any)->None:
     # Add the documents which we uploaded and split
     try:
         vector_db.add_documents(documents=documents)
-        logging.info(f"Embedded {len(documents)} documents in table {TABLE_NAME_FOR_DOCUMENTS}.")
-        gr.Info(f"Embedded {len(documents)} documents in table {TABLE_NAME_FOR_DOCUMENTS}.")
+        msg=f"Embedded {len(documents)} documents in table {TABLE_NAME_FOR_DOCUMENTS}."
+        logging.info(msg)
+        gr.Info(msg)
     except Exception as e:
         logging.error(f"Adding document embeddings failed with error {e}.")
     finally:
