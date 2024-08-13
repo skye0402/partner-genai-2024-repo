@@ -27,15 +27,15 @@ def get_hana_connection(conn_params: dict)->Connection:
     
 def main()->None:
     """ Let's check the connection - that's all what it does """    
-    log_level = int(os.environ.get("APPLOGLEVEL", logging.info))
+    log_level = int(os.environ.get("APPLOGLEVEL", logging.INFO))
     if log_level < 10: log_level = 40
     logging.basicConfig(level=log_level,)
     
     # Get the HANA Cloud data from the environment
     hana_cloud = {
-        "host": os.getenv("HOST"),
-        "user": os.getenv("USERNAME"),
-        "password": os.getenv("PASSWORD") 
+        "host": os.getenv("HANA_DB_ADDRESS"),
+        "user": os.getenv("HANA_DB_USER"),
+        "password": os.getenv("HANA_DB_PASSWORD") 
     }
     if (hana_cloud["host"]==None or hana_cloud["user"]==None or hana_cloud["password"]==None):
         logging.error("One or more of the host/user/password environment variables is not set. Did you maintain the '.env' file?")

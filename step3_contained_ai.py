@@ -9,25 +9,30 @@ from operator import itemgetter
 
 from langchain.prompts.chat import (
         ChatPromptTemplate,
-        SystemMessagePromptTemplate,
         HumanMessagePromptTemplate,
         )
-from langchain.schema.language_model import BaseLanguageModel
-from langchain.schema.runnable import RunnableSerializable
+from langchain_core.language_models import BaseLanguageModel
+from langchain_core.messages import SystemMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.embeddings import Embeddings
+from langchain_core.runnables import RunnableSerializable, RunnableLambda, RunnablePassthrough
 
+from langchain.memory import ConversationBufferMemory
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder, HumanMessagePromptTemplate, PromptTemplate
 
 from langchain_community.vectorstores.hanavector import HanaDB
-from langchain_community.embeddings.sentence_transformer import SentenceTransformerEmbeddings
 from langchain_community.document_loaders.pdf import PyPDFLoader
+
+from gen_ai_hub.proxy import GenAIHubProxyClient
+from gen_ai_hub.proxy.langchain import init_llm, init_embedding_model
 
 from typing import List
 
-from workshop_utils import AICoreHandling, get_hana_connection, get_llm_model
+from workshop_utils import get_hana_connection
 
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL","all-MiniLM-L12-v2") 
-DEFAULT_EF = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
-TABLE_NAME_FOR_DOCUMENTS  = "CML2024WS"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL","text-embedding-3-small") 
+TABLE_NAME_FOR_DOCUMENTS  = "PWC2024"
 
 SYS_TEMPLATE = """
     GPT4 Correct System: You are a helpful multilingual translator to answer the questions based on documents you find below. Don't make up things. If you don't know the answer, say you don't know.
@@ -44,23 +49,20 @@ HUMAN_TEMPLATE = """
 """
 
 LOGO_MARKDOWN = f"""
-### Conference on Machine Learning 2024
-![LLM Privacy on SAP BTP](file/img/cml2024.webp)
+### PwC SAP Workshop August 2024
+![PwC SAP Workshop](file/img/cml2024.webp)
 """
 
 BLOCK_CSS = """
 gradio-app > .gradio-container {
     max-width: 100% !important;
-    
 }
 .contain { display: flex !important; flex-direction: column !important; }
-#chat_window { height: 70vh !important; }
-#column_left { height: 88vh !important; }
-#sql_col_left1 { height: 82vh !important;}
+#chat_window { height: calc(100vh - 112px - 64px) !important; }
+#genai_tab { flex-grow: 1 !important; overflow: auto !important; }
+#column_left { height: 100vh !important; }
 #arch_gallery { height: 88vh !important;}
-#buttons button {
-    min-width: min(120px,100%);
-}
+#login_count_df { height: 88vh !important;}
 footer {
     display:none !important
 }
@@ -79,37 +81,35 @@ def call_llm(state: dict, history: list)->any:
     """ Handle LLM request and response """
     do_stream = True
     if state["skip_llm"] == True:
+        yield history
         return history
     history[-1][1] = ""
-    llm = state.get("model")
-    if not llm:
-        state["model"] = get_llm_model(
-            ai_core=state["ai_core"],
-            temperature=0.0,
-            top_p=0.8,
-            do_streaming=do_stream      
-        )
+    if not state.get("memory", None):
+        state["memory"]=ConversationBufferMemory(memory_key="history", return_messages=True)
+        state["memory"].clear()
     # Below part is just temporary.----------------
-    llm = state["model"]
-    my_prompt = ChatPromptTemplate(
-        messages=[
-            SystemMessagePromptTemplate.from_template("GPT4 Correct System: You are speaking to a 4 year old child.<|end_of_turn|>"),
-            HumanMessagePromptTemplate.from_template("GPT4 Correct User: The child asked: '{query}'. Reply in the child's language!")  
-        ],
-        input_variables=['query'],
-    )
+    my_prompt = ChatPromptTemplate.from_messages(
+                [
+                    SystemMessage(content="You are an assistant speaking to a 4 year old child."),
+                    MessagesPlaceholder(variable_name="history"),
+                    HumanMessagePromptTemplate(prompt=PromptTemplate(input_variables=["input"], template="{input}"))
+                ],
+            )    
     rag_chain = (
-            {
-                "query": itemgetter("query"), 
-            } 
-            | my_prompt 
-            | llm
-    )
+        {
+            "history": RunnableLambda(state["memory"].load_memory_variables) | itemgetter("history"), 
+            "input": RunnablePassthrough()
+        }
+        | my_prompt
+        | LLM
+        | StrOutputParser()
+    ) 
     query = history[-1][0]
     # ------------------We keep below  part
     if do_stream:
         try:
-            for response in rag_chain.stream({"query": query}): 
+            response: str
+            for response in rag_chain.stream({"input": query}): 
                 history[-1][1] += response
                 logging.debug(history[-1][1])
                 yield history
@@ -123,6 +123,7 @@ def call_llm(state: dict, history: list)->any:
             yield history
         except Exception as e:
             history[-1][1] += str(f"😱 Oh no! It seems the LLM has some issues. Error was: {e}.")
+    state["memory"].save_context({"input": history[-1][0]},{"output": history[-1][1]})
     return history 
 
 def retrieve_data(vector_db: HanaDB, llm: BaseLanguageModel)->RunnableSerializable:
@@ -157,7 +158,7 @@ def uploaded_files(state: dict, files: any)->None:
     
     if not state.get("connection"):
         state["connection"] = get_hana_connection(conn_params=state["conn_data"])
-    vector_db = HanaDB(embedding=DEFAULT_EF, connection=state["connection"], table_name=TABLE_NAME_FOR_DOCUMENTS)
+    vector_db = HanaDB(embedding=EMBMOD, connection=state["connection"], table_name=TABLE_NAME_FOR_DOCUMENTS)
     try:
         vector_db.delete(filter={})
     except Exception as e:
@@ -176,24 +177,23 @@ def uploaded_files(state: dict, files: any)->None:
 def clear_data(state: dict)->list:
     """ Clears the history of the chat """
     state_new = {
-        "ai_core": state.get("ai_core"), "conn_data": state.get("conn_data", None), 
+        "conn_data": state.get("conn_data", None), 
     }
     return [None, state_new]
 
-def build_chat_view(conn_data: dict, ai_core: AICoreHandling)->Blocks:
+def build_chat_view(conn_data: dict)->Blocks:
     """ Build the view with Gradio blocks """
     with gr.Blocks(
-            title="CML Workshop - Retrieve-Augment-Generate in a BTP-contained setting", 
+            title="PwC Workshop - Learning SAP Generative AI Hub and HANA VS", 
             theme=gr.themes.Soft(),
             css=BLOCK_CSS
         ) as chat_view:
         state = gr.State({})
         state.value["conn_data"] = conn_data
-        state.value["ai_core"] = ai_core
         with gr.Row(elem_id="overall_row") as main_screen:
             with gr.Column(scale=10, elem_id="column_left"):
                 chatbot = gr.Chatbot(
-                    label="Document Chat - HANA Vector Store and AI Core LLM",
+                    label="Document Chat - HANA Vector Store and GenAI LLM",
                     elem_id="chat_window",
                     bubble_full_width=False,
                     show_copy_button=True,
@@ -232,7 +232,7 @@ def build_chat_view(conn_data: dict, ai_core: AICoreHandling)->Blocks:
 
 
 def main()->None:
-    """ Main program of the tutorial for CML """
+    """ Main program of the tutorial for workshop """
     args = {}
     args["host"] = os.environ.get("HOSTNAME","0.0.0.0")
     args["port"] = os.environ.get("HOSTPORT",51040)
@@ -241,16 +241,28 @@ def main()->None:
     logging.basicConfig(level=log_level,)
         
     hana_cloud = {
-        "host": os.getenv("HOST"),
-        "user": os.getenv("USERNAME",""),
-        "password": os.getenv("PASSWORD","") 
+        "host": os.getenv("HANA_DB_ADDRESS"),
+        "user": os.getenv("HANA_DB_USER",""),
+        "password": os.getenv("HANA_DB_PASSWORD","") 
     }
     
-    # Get ready to connect to AI Core
-    ai_core = AICoreHandling()
+    # Connect to GenAI Hub
+    genai_proxy = GenAIHubProxyClient()
+    global LLM, EMBMOD
+    LLM = init_llm(
+        model_name="gpt-4o", 
+        proxy_client=genai_proxy, 
+        temperature=0.5, 
+        top_p=0.7, 
+        max_tokens=500
+    )
+    EMBMOD = init_embedding_model(
+        model_name=EMBEDDING_MODEL, 
+        proxy_client=genai_proxy
+    )
     
     # Create chat UI
-    chat_view = build_chat_view(conn_data=hana_cloud, ai_core=ai_core)
+    chat_view = build_chat_view(conn_data=hana_cloud)
     # Queue input of each user
     chat_view.queue(max_size=10)
     # Start the Gradio server
