@@ -3,4 +3,4 @@ hana_ml==2.21.24072600
 hdbcli==2.21.28
 gradio==4.41.0
 generative-ai-hub-sdk[langchain]>=1.11.1
-pypdf>=4.3.1
+PyMuPDF>=1.24.9

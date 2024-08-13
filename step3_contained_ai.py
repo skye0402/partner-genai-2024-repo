@@ -7,22 +7,20 @@ import os, logging, json
 
 from operator import itemgetter
 
-from langchain.prompts.chat import (
-        ChatPromptTemplate,
-        HumanMessagePromptTemplate,
-        )
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages import SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.embeddings import Embeddings
 from langchain_core.runnables import RunnableSerializable, RunnableLambda, RunnablePassthrough
+from langchain_core.documents import Document
 
 from langchain.memory import ConversationBufferMemory
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder, HumanMessagePromptTemplate, PromptTemplate
 
 from langchain_community.vectorstores.hanavector import HanaDB
-from langchain_community.document_loaders.pdf import PyPDFLoader
+from langchain_community.vectorstores.utils import DistanceStrategy
+from langchain_community.document_loaders.pdf import PyMuPDFLoader
 
 from gen_ai_hub.proxy import GenAIHubProxyClient
 from gen_ai_hub.proxy.langchain import init_llm, init_embedding_model
@@ -34,19 +32,10 @@ from workshop_utils import get_hana_connection
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL","text-embedding-3-small") 
 TABLE_NAME_FOR_DOCUMENTS  = "PWC2024"
 
-SYS_TEMPLATE = """
-    GPT4 Correct System: You are a helpful multilingual translator to answer the questions based on documents you find below. Don't make up things. If you don't know the answer, say you don't know.
-    Always reply in the user's language not matter the document language.<|end_of_turn|>
-"""
-
-HUMAN_TEMPLATE = """
-    GPT4 Correct User: The question from the user is: '{query}'.
-    Use formatting and markdown to structure the output. Also add the sources (document name and pages you referred to).
-    Reply in the user's language! Below are the documents:
-    ===========================
-    {context}<|end_of_turn|>
-    GPT4 Correct Assistant:
-"""
+RAG_TEMPLATE = """You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Be as detailed as necessary. Write the sources (document and page or paragraph if available) at the bottom as footnotes. Use markdown to structure the output.
+Question: {input}
+Context: {context}
+Answer:"""
 
 LOGO_MARKDOWN = f"""
 ### PwC SAP Workshop August 2024
@@ -68,6 +57,7 @@ footer {
 }
 """
 
+
 def user(state: dict, user_message: str, history: list)->tuple:
     """ Handle user interaction in the chat window """
     state["skip_llm"] = False
@@ -77,9 +67,11 @@ def user(state: dict, user_message: str, history: list)->tuple:
     rv =  "", history + [[user_message, None]]
     return rv
 
-def call_llm(state: dict, history: list)->any:
+
+def call_llm(state: dict, history: list, rag_active: bool)->any:
     """ Handle LLM request and response """
     do_stream = True
+    my_chain = None
     if state["skip_llm"] == True:
         yield history
         return history
@@ -87,64 +79,85 @@ def call_llm(state: dict, history: list)->any:
     if not state.get("memory", None):
         state["memory"]=ConversationBufferMemory(memory_key="history", return_messages=True)
         state["memory"].clear()
-    # Below part is just temporary.----------------
-    my_prompt = ChatPromptTemplate.from_messages(
-                [
-                    SystemMessage(content="You are an assistant speaking to a 4 year old child."),
-                    MessagesPlaceholder(variable_name="history"),
-                    HumanMessagePromptTemplate(prompt=PromptTemplate(input_variables=["input"], template="{input}"))
-                ],
-            )    
-    rag_chain = (
-        {
-            "history": RunnableLambda(state["memory"].load_memory_variables) | itemgetter("history"), 
-            "input": RunnablePassthrough()
-        }
-        | my_prompt
-        | LLM
-        | StrOutputParser()
-    ) 
+    if rag_active:
+        # Below part is just temporary.----------------
+        pass
+        # ------------------ End of temporary part
+    else:
+        my_prompt = ChatPromptTemplate.from_messages(
+                    [
+                        SystemMessage(content="You are an assistant speaking users in the age group of 15 to 20."),
+                        MessagesPlaceholder(variable_name="history"),
+                        HumanMessagePromptTemplate(prompt=PromptTemplate(input_variables=["input"], template="{input}"))
+                    ],
+                )    
+        my_chain = (
+            {
+                "history": RunnableLambda(state["memory"].load_memory_variables) | itemgetter("history"), 
+                "input": RunnablePassthrough()
+            }
+            | my_prompt
+            | LLM
+            | StrOutputParser()
+        )
     query = history[-1][0]
-    # ------------------We keep below  part
-    if do_stream:
-        try:
-            response: str
-            for response in rag_chain.stream({"input": query}): 
+    try:
+        if my_chain:
+            if do_stream:
+                response: str
+                input_value = query if rag_active else {"input": query}
+                for response in my_chain.stream(input_value): 
+                    history[-1][1] += response
+                    logging.debug(history[-1][1])
+                    yield history
+            else:
+                response=my_chain.invoke({"query": query}) 
                 history[-1][1] += response
                 logging.debug(history[-1][1])
                 yield history
-        except Exception as e:
-            history[-1][1] += str(f"😱 Oh no! It seems the LLM has some issues. Error was: {e}.")
-    else:
-        try:
-            response=rag_chain.invoke({"query": query}) 
-            history[-1][1] += response
-            logging.debug(history[-1][1])
+        else: # Chain not active
+            history[-1][1] = "This function is not active yet."
             yield history
-        except Exception as e:
-            history[-1][1] += str(f"😱 Oh no! It seems the LLM has some issues. Error was: {e}.")
-    state["memory"].save_context({"input": history[-1][0]},{"output": history[-1][1]})
-    return history 
+    except Exception as e:
+        history[-1][1] += str(f"😱 Oh no! It seems the LLM has some issues. Error was: {e}.")
+        yield history
+    finally:        
+        state["memory"].save_context({"input": history[-1][0]},{"output": history[-1][1]})
+        return history 
+
 
 def retrieve_data(vector_db: HanaDB, llm: BaseLanguageModel)->RunnableSerializable:
     """ Retrieves data from store and passes back result """
-    return
+    pass
 
-def uploaded_files(state: dict, files: any)->None:
+
+def format_docs(docs: List[Document]) -> str:
+    """ Concatenates the result documents after vector db retrieval """
+    result = ""
+    for doc in docs:
+        source = f"Source document '{doc.metadata['source']}'" if 'source' in doc.metadata else ""
+        page = f"Page {doc.metadata['page']}" if 'page' in doc.metadata else ""
+        result +=  f"Below text is from {source} {page}:\n-------------------------------------------\n{doc.page_content}\n"
+    return result
+
+
+def uploaded_files(state: dict, files: List[str])->None:
     """ Handles the uploaded pdf files and care for embedding into HANA VS """
+    success = False
     documents = []
-    if files==None: # Happens when the list is cleared
-        return
+    if not files: # Happens when the list is cleared
+        return [gr.Checkbox(visible=False, value=False)]
     for file in files:
         if file.endswith('.pdf'):
-            loader = PyPDFLoader(file_path=file, extract_images=False)
+            loader = PyMuPDFLoader(file_path=file, extract_images=False) 
         else:
-            raise ValueError('File format not supported. Please provide a .pdf or .docx file.')
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, 
-                                                    chunk_overlap=100, 
-                                                    length_function=len, 
-                                                    is_separator_regex=False
-                                                    )
+            raise ValueError('File format not supported. Please provide a .pdf file.')
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=2000, 
+            chunk_overlap=100, 
+            length_function=len, 
+            is_separator_regex=False
+        )
         docs=loader.load_and_split(text_splitter)
         for doc in docs:
             if doc.metadata.get("source", None) != None:
@@ -158,7 +171,12 @@ def uploaded_files(state: dict, files: any)->None:
     
     if not state.get("connection"):
         state["connection"] = get_hana_connection(conn_params=state["conn_data"])
-    vector_db = HanaDB(embedding=EMBMOD, connection=state["connection"], table_name=TABLE_NAME_FOR_DOCUMENTS)
+    vector_db = HanaDB(
+        connection=state["connection"],
+        embedding=EMBMOD, 
+        table_name=TABLE_NAME_FOR_DOCUMENTS,
+        vector_column_length=0,  
+    )
     try:
         vector_db.delete(filter={})
     except Exception as e:
@@ -169,10 +187,12 @@ def uploaded_files(state: dict, files: any)->None:
         msg=f"Embedded {len(documents)} documents in table {TABLE_NAME_FOR_DOCUMENTS}."
         logging.info(msg)
         gr.Info(msg)
+        success = True
     except Exception as e:
         logging.error(f"Adding document embeddings failed with error {e}.")
     finally:
-        return
+        return [gr.Checkbox(visible=success, value=success)]
+    
     
 def clear_data(state: dict)->list:
     """ Clears the history of the chat """
@@ -180,6 +200,7 @@ def clear_data(state: dict)->list:
         "conn_data": state.get("conn_data", None), 
     }
     return [None, state_new]
+
 
 def build_chat_view(conn_data: dict)->Blocks:
     """ Build the view with Gradio blocks """
@@ -211,6 +232,7 @@ def build_chat_view(conn_data: dict)->Blocks:
                         autofocus=True                    )
             with gr.Column(scale=3, elem_id="column_right") as column_right:
                 files = gr.File(label="RAG File Upload", file_count="multiple", file_types=[".pdf"])
+                rag_chkbox = gr.Checkbox(label="RAG active", value=False, visible=True, elem_id="rag_chkbox")
                 clear = gr.Button(value="Clear history")
                 cml2024img = gr.Markdown(value=LOGO_MARKDOWN, elem_id="cml2024_box")
         msg_box.submit(user, 
@@ -218,7 +240,7 @@ def build_chat_view(conn_data: dict)->Blocks:
                        outputs=[msg_box, chatbot], 
                        queue=True).then(
                             call_llm, 
-                            inputs=[state, chatbot], 
+                            inputs=[state, chatbot, rag_chkbox], 
                             outputs=[chatbot]
         )
         clear.click(clear_data, 
@@ -227,7 +249,7 @@ def build_chat_view(conn_data: dict)->Blocks:
                     queue=True)
         files.change(uploaded_files, 
                      inputs=[state, files],
-                     outputs=[])
+                     outputs=[rag_chkbox])
     return chat_view    
 
 
